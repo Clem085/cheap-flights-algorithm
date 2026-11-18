@@ -189,7 +189,7 @@ because it is a few dollars cheaper.
 --from RDU,CLT,ATL
 --to LHR,MAN,BHX
 --depart 2026-12-20:2026-12-24
---days 6:10
+--days 13:15
 --one-way
 --currency USD
 --sort cheapest

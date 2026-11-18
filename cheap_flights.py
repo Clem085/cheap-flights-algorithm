@@ -20,6 +20,7 @@ from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError, sy
 
 
 GOOGLE_FLIGHTS_SEARCH = "https://www.google.com/travel/flights/search"
+EXTRACTOR_VERSION = "v3"
 DEFAULT_DB = Path("flight_search_cache.sqlite3")
 DEFAULT_DEBUG_DIR = Path("debug")
 
@@ -33,7 +34,7 @@ class SearchSpec:
 
     @property
     def key(self) -> str:
-        raw = f"{self.origin}|{self.destination}|{self.depart}|{self.return_date or ''}"
+        raw = f"{EXTRACTOR_VERSION}|{self.origin}|{self.destination}|{self.depart}|{self.return_date or ''}"
         return hashlib.sha256(raw.encode()).hexdigest()
 
     @property
@@ -324,17 +325,45 @@ def parse_stops(text: str) -> tuple[int | None, bool]:
 
 
 def guess_airline(text: str) -> str:
-    patterns = (
-        r"(?:Operated by|Airline(?:s)?[: ]+)\s*([^.;,\n]+)",
-        r"\b(American Airlines|United Airlines|Delta|British Airways|"
-        r"Virgin Atlantic|Aer Lingus|Lufthansa|Air France|KLM|Iberia|"
-        r"JetBlue|Air Canada|Icelandair|TAP Air Portugal)\b",
+    """
+    Prefer Google's accessible "flight with ..." carrier description.
+    Include the operating carrier when Google explicitly provides one.
+    """
+    marketing = ""
+    operated_by = ""
+
+    m = re.search(
+        r"(?:nonstop|\d+\s+stops?)\s+flight\s+with\s+(.+?)\.\s*"
+        r"(?:Operated by|Leaves|Total duration|Select flight)",
+        text,
+        re.IGNORECASE,
     )
-    for p in patterns:
-        m = re.search(p, text, re.IGNORECASE)
-        if m:
-            return m.group(1).strip()
-    return ""
+    if m:
+        marketing = re.sub(r"\s+", " ", m.group(1)).strip(" .")
+
+    m = re.search(
+        r"\bOperated by\s+(.+?)\.\s*(?:Leaves|Total duration|Select flight)",
+        text,
+        re.IGNORECASE,
+    )
+    if m:
+        operated_by = re.sub(r"\s+", " ", m.group(1)).strip(" .")
+
+    if marketing and operated_by:
+        return f"{marketing} (operated by {operated_by})"
+    if marketing:
+        return marketing
+    if operated_by:
+        return operated_by
+
+    known = re.search(
+        r"\b(American Airlines|American|United Airlines|United|Delta|"
+        r"British Airways|Virgin Atlantic|Aer Lingus|Lufthansa|Air France|"
+        r"KLM|Iberia|JetBlue|Air Canada|Icelandair|TAP Air Portugal)\b",
+        text,
+        re.IGNORECASE,
+    )
+    return known.group(1).strip() if known else ""
 
 
 def normalize_text(text: str | None) -> str:
@@ -345,15 +374,12 @@ def normalize_text(text: str | None) -> str:
 
 def visible_card_records(page: Page) -> list[dict[str, str]]:
     """
-    Extract from the currently observed Google Flights result-card surfaces.
+    Extract one representation per visible Google Flights result card.
 
-    Preferred source:
-      accessible flight links whose aria-label starts with "From " and ends in
-      "Select flight".
-
-    Fallback:
-      currently observed Google Flights list items (`li.pIav2d`) and other
-      accessible "Select flight" nodes.
+    v2 collected both the accessible flight link and its containing visible
+    list item, which duplicated the same itinerary. v3 uses accessible labels
+    exclusively when available and falls back to visible list-item text only
+    if the accessible result links disappear.
     """
     records = page.evaluate(
         """
@@ -361,30 +387,49 @@ def visible_card_records(page: Page) -> list[dict[str, str]]:
           const visible = e =>
             !!e && (e.offsetWidth || e.offsetHeight || e.getClientRects().length);
 
-          const selectors = [
-            '[role="link"][aria-label^="From "][aria-label$="Select flight"]',
-            'li.pIav2d',
-            '[aria-label*="Select flight"]'
-          ];
+          const clean = s => (s || '').replace(/\\s+/g, ' ').trim();
 
-          const nodes = [];
-          for (const sel of selectors) {
-            for (const el of document.querySelectorAll(sel)) {
-              if (visible(el)) nodes.push(el);
+          const accessible = [
+            ...document.querySelectorAll(
+              '[role="link"][aria-label^="From "][aria-label$="Select flight"]'
+            )
+          ].filter(visible);
+
+          if (accessible.length) {
+            const seen = new Set();
+            const out = [];
+
+            for (const el of accessible) {
+              const aria = clean(el.getAttribute('aria-label'));
+              if (!aria || seen.has(aria)) continue;
+
+              seen.add(aria);
+              out.push({aria, text: ''});
             }
+
+            return out;
           }
+
+          const fallback = [
+            ...document.querySelectorAll(
+              'li.pIav2d, [aria-label*="Select flight"]'
+            )
+          ].filter(visible);
 
           const seen = new Set();
           const out = [];
-          for (const el of nodes) {
-            const aria = (el.getAttribute('aria-label') || '').replace(/\\s+/g, ' ').trim();
-            const text = (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim();
-            const key = aria + '|' + text;
-            if (!aria && !text) continue;
-            if (seen.has(key)) continue;
+
+          for (const el of fallback) {
+            const aria = clean(el.getAttribute('aria-label'));
+            const text = clean(el.innerText || el.textContent);
+            const key = aria || text;
+
+            if (!key || seen.has(key)) continue;
+
             seen.add(key);
             out.push({aria, text});
           }
+
           return out;
         }
         """
@@ -613,7 +658,7 @@ def search_one(
             warnings.append(route_warning)
 
         records = visible_card_records(page)
-        results = parse_cards(spec, url, records, currency)
+        results = dedupe_results(parse_cards(spec, url, records, currency))
 
         if not results:
             png, html, txt = save_debug(page, debug_dir, spec, records)
@@ -629,6 +674,56 @@ def search_one(
         return [], warnings + [
             f"{type(exc).__name__}: {exc}; debug: {png}, {html}, {txt}"
         ]
+
+
+def _first_departure_arrival_times(text: str) -> tuple[str, str]:
+    """
+    Extract the first departure/arrival time pair so distinct flights that
+    share a fare, duration and stop count are not collapsed together.
+    """
+    times = re.findall(
+        r"\b(?:[01]?\d|2[0-3]):[0-5]\d\s*(?:AM|PM)?\b",
+        text,
+        re.IGNORECASE,
+    )
+    if len(times) >= 2:
+        return times[0].upper(), times[1].upper()
+    return "", ""
+
+
+def dedupe_results(results: list[FlightResult]) -> list[FlightResult]:
+    """
+    Remove duplicate representations of the same Google Flights card while
+    preserving genuinely different itineraries.
+    """
+    unique: list[FlightResult] = []
+    seen: set[tuple] = set()
+
+    for r in results:
+        source = r.aria_label or r.raw_text
+        depart_time, arrive_time = _first_departure_arrival_times(source)
+
+        key = (
+            r.searched_origin,
+            r.searched_destination,
+            r.depart_date,
+            r.return_date,
+            r.currency,
+            round(float(r.price), 2),
+            r.duration_minutes,
+            r.stops,
+            depart_time,
+            arrive_time,
+            normalize_text(r.airline).lower(),
+        )
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+        unique.append(r)
+
+    return unique
 
 
 def sort_results(
@@ -776,6 +871,7 @@ def main() -> int:
         args.one_way,
     )
 
+    print(f"Cheap Flights extractor: {EXTRACTOR_VERSION}")
     print(f"Search combinations: {len(specs)}")
     print(f"From: {', '.join(args.origins)}")
     print(f"To:   {', '.join(args.destinations)}")
@@ -879,6 +975,12 @@ def main() -> int:
             "The .txt file records the page state and candidate card labels."
         )
         return 1
+
+    before_dedupe = len(all_results)
+    all_results = dedupe_results(all_results)
+    removed = before_dedupe - len(all_results)
+    if removed:
+        print(f"Removed {removed} duplicate result row(s) before export.")
 
     ordered = sort_results(
         all_results,

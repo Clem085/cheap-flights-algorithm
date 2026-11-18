@@ -1,0 +1,10 @@
+{
+  "page_state": {
+    "title": "Charlotte to Munich | Google Flights",
+    "url": "https://www.google.com/travel/flights/search?q=Round+trip+flights+from+CLT+to+MUC+on+2026-12-29+returning+2027-01-12&curr=USD&hl=en&gl=us",
+    "blocked": false,
+    "consent": false,
+    "body_excerpt": "Skip to main content Accessibility feedback Explore Flights Hotels Vacation rentals Change appearance Sign in Loading results Flight search Round trip 1 Economy Charlotte CLT Munich MUC Filters All filters Stops Airlines Bags Price Times Emissions Connecting airports Duration Search results No results returned. Oops, something went wrong. Reload Language\u200bEnglish (United States) Location\u200bUnited States CurrencyUSD About Privacy Terms Join user studies Feedback Help Center Displayed currencies may differ from the currencies used to purchase flights. Learn more"
+  },
+  "candidate_cards": []
+}
