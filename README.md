@@ -67,7 +67,7 @@ Google Flights pages would be visited.
 
 ```bash
 python cheap_flights.py \
-  --from RDU,CLT,GSO \
+  --from RDU,CLT,ATL \
   --to MAN,LHR,BHX \
   --depart 2026-12-20:2026-12-23 \
   --days 7:9 \
@@ -128,7 +128,7 @@ Once the small search works:
 
 ```bash
 python cheap_flights.py \
-  --from RDU,CLT,GSO \
+  --from RDU,CLT,ATL \
   --to MAN,LHR,BHX \
   --depart 2026-12-20:2026-12-23 \
   --days 7:9 \
@@ -186,7 +186,7 @@ because it is a few dollars cheaper.
 ## 8. Useful options
 
 ```text
---from RDU,CLT,GSO
+--from RDU,CLT,ATL
 --to LHR,MAN,BHX
 --depart 2026-12-20:2026-12-24
 --days 6:10
